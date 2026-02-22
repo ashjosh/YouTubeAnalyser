@@ -6,3 +6,5 @@ faiss-cpu
 requests
 openai
 tiktoken
+youtube-transcript-api
+
