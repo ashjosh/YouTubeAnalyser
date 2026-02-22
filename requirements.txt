@@ -7,4 +7,4 @@ requests
 openai
 tiktoken
 youtube-transcript-api
-
+tiktoken
