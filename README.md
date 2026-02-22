@@ -1,6 +1,10 @@
 # YouTube Transcript RAG (Standalone Streamlit App)
 # YouTube Transcript RAG (Streamlit)
 
+## Sample Youtube Video to test
+- https://www.youtube.com/watch?v=dQw4w9WgXcQ
+- https://www.youtube.com/watch?v=aircAruvnKk
+- https://www.youtube.com/watch?v=8mAITcNt710
 This is a **separate project** and does not modify the main Streamlit app in the repository root.
 This app lets you run Q&A over any YouTube video transcript using a Retrieval-Augmented Generation (RAG) workflow.
 
@@ -41,7 +45,3 @@ streamlit run app.py
 app.py
 app.py
 
-**Sample Youtube Video to test:**
-https://www.youtube.com/watch?v=dQw4w9WgXcQ
-https://www.youtube.com/watch?v=aircAruvnKk
-https://www.youtube.com/watch?v=8mAITcNt710
