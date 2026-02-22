@@ -6,5 +6,4 @@ faiss-cpu
 requests
 openai
 tiktoken
-youtube-transcript-api
-tiktoken
+youtube-transcript-api>=0.6.1
