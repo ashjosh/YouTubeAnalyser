@@ -3,6 +3,8 @@ import importlib
 import json
 import os
 import re
+import xml.etree.ElementTree as ET
+from html import unescape
 from pathlib import Path
 from urllib.parse import parse_qs, urlparse
 
@@ -61,6 +63,25 @@ def _fetch_transcript_via_library(video_id: str) -> str:
 
     mod = importlib.import_module("youtube_transcript_api")
     api = mod.YouTubeTranscriptApi
+    api_cls = mod.YouTubeTranscriptApi
+
+    transcript = None
+    languages = ["en", "en-US", "en-GB", "hi"]
+
+    if hasattr(api_cls, "get_transcript"):
+        transcript = api_cls.get_transcript(video_id, languages=languages)
+    else:
+        api = api_cls()
+        transcript = api.fetch(video_id, languages=languages)
+
+    parts = []
+    for item in transcript:
+        if isinstance(item, dict):
+            text = item.get("text", "").strip()
+        else:
+            text = getattr(item, "text", "").strip()
+        if text:
+            parts.append(text)
 
     transcript = api.get_transcript(video_id, languages=["en", "en-US", "en-GB", "hi"])
     parts = [item.get("text", "").strip() for item in transcript if item.get("text")]
@@ -85,17 +106,54 @@ def _fetch_transcript_via_timedtext(video_id: str) -> str:
             continue
         payload = resp.json() if resp.text.strip().startswith("{") else {}
         events = payload.get("events", [])
+
         parts = []
         for event in events:
             for seg in event.get("segs", []):
                 text = seg.get("utf8", "").strip()
+        body = resp.text.strip()
+        if body.startswith("{"):
+            payload = resp.json()
+            events = payload.get("events", [])
+            for event in events:
+                for seg in event.get("segs", []):
+                    text = seg.get("utf8", "").strip()
+                    if text:
+                        parts.append(text)
+        elif body.startswith("<"):
+            root = ET.fromstring(resp.text)
+            for node in root.findall('.//text'):
+                text = unescape("".join(node.itertext())).strip()
                 if text:
                     parts.append(text)
+
         if parts:
             return " ".join(parts)
 
     raise ValueError("No captions found via timedtext endpoint.")
 
+
+
+
+def _extract_caption_tracks_from_watch_html(html: str):
+    match = re.search(r"ytInitialPlayerResponse\s*=\s*(\{.+?\});", html)
+    if match:
+        try:
+            player_response = json.loads(match.group(1))
+            captions = player_response.get("captions", {}).get("playerCaptionsTracklistRenderer", {})
+            tracks = captions.get("captionTracks", [])
+            if tracks:
+                return tracks
+        except json.JSONDecodeError:
+            pass
+
+    fallback_match = re.search(r'"captionTracks"\s*:\s*(\[.*?\])\s*,\s*"audioTracks"', html, flags=re.S)
+    if fallback_match:
+        try:
+            return json.loads(fallback_match.group(1))
+        except json.JSONDecodeError:
+            return []
+    return []
 
 def _fetch_transcript_via_page_scrape(video_id: str) -> str:
     """Fallback transcript fetcher from watch page caption track metadata."""
@@ -114,6 +172,7 @@ def _fetch_transcript_via_page_scrape(video_id: str) -> str:
     player_response = json.loads(match.group(1))
     captions = player_response.get("captions", {}).get("playerCaptionsTracklistRenderer", {})
     tracks = captions.get("captionTracks", [])
+    tracks = _extract_caption_tracks_from_watch_html(response.text)
     if not tracks:
         raise ValueError("No captions/transcript available for this video.")
 
@@ -130,6 +189,18 @@ def _fetch_transcript_via_page_scrape(video_id: str) -> str:
     for event in events:
         for seg in event.get("segs", []):
             text = seg.get("utf8", "").strip()
+    body = transcript_resp.text.strip()
+    if body.startswith("{"):
+        events = transcript_resp.json().get("events", [])
+        for event in events:
+            for seg in event.get("segs", []):
+                text = seg.get("utf8", "").strip()
+                if text:
+                    parts.append(text)
+    else:
+        root = ET.fromstring(transcript_resp.text)
+        for node in root.findall('.//text'):
+            text = unescape("".join(node.itertext())).strip()
             if text:
                 parts.append(text)
 
