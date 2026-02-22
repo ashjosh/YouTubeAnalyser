@@ -40,3 +40,8 @@ streamlit run app.py
 - If no captions exist for a video, indexing will fail with an explanatory message.
 app.py
 app.py
+
+**Sample Youtube Video to test:**
+https://www.youtube.com/watch?v=dQw4w9WgXcQ
+https://www.youtube.com/watch?v=aircAruvnKk
+https://www.youtube.com/watch?v=8mAITcNt710
