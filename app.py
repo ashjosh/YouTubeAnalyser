@@ -1,7 +1,9 @@
 import json
 import importlib
+import json
 import os
 import re
+from pathlib import Path
 from urllib.parse import parse_qs, urlparse
 
 import requests
@@ -15,6 +17,7 @@ EMBEDDING_MODEL = "text-embedding-3-small"
 CHAT_MODEL = "gpt-4o-mini"
 TOKEN_LIMIT_PER_CHUNK = 500
 TOKEN_OVERLAP = 60
+VECTOR_DB_ROOT = Path("vector_store")
 
 
 def init_state() -> None:
@@ -28,6 +31,8 @@ def init_state() -> None:
         st.session_state.vector_store = None
     if "video_id" not in st.session_state:
         st.session_state.video_id = ""
+    if "vector_db_path" not in st.session_state:
+        st.session_state.vector_db_path = ""
 
 
 def extract_video_id(url_or_id: str) -> str:
@@ -154,6 +159,11 @@ def fetch_transcript(video_id: str) -> str:
 
 
 def chunk_transcript_by_tokens(text: str, max_tokens: int, overlap: int):
+    if max_tokens <= 0:
+        raise ValueError("max_tokens must be greater than 0.")
+    if overlap >= max_tokens:
+        raise ValueError("overlap must be smaller than max_tokens.")
+
     enc = tiktoken.get_encoding("cl100k_base")
     tokens = enc.encode(text)
 
@@ -195,11 +205,58 @@ def build_vector_store(chunks, api_key: str):
     return FAISS.from_texts(texts=texts, embedding=embeddings, metadatas=metadatas)
 
 
+def get_vector_db_path(video_id: str) -> Path:
+    return VECTOR_DB_ROOT / video_id
+
+
+def save_vector_store(vector_store: FAISS, video_id: str) -> Path:
+    path = get_vector_db_path(video_id)
+    path.mkdir(parents=True, exist_ok=True)
+    vector_store.save_local(str(path))
+    return path
+
+
+def save_index_metadata(video_id: str, transcript_text: str, chunks) -> None:
+    path = get_vector_db_path(video_id)
+    metadata_path = path / "metadata.json"
+    payload = {
+        "video_id": video_id,
+        "transcript_preview": transcript_text[:5000],
+        "chunk_count": len(chunks),
+        "chunks": chunks,
+    }
+    metadata_path.write_text(json.dumps(payload, ensure_ascii=False, indent=2), encoding="utf-8")
+
+
+def load_index_metadata(video_id: str):
+    metadata_path = get_vector_db_path(video_id) / "metadata.json"
+    if not metadata_path.exists():
+        return None
+    return json.loads(metadata_path.read_text(encoding="utf-8"))
+
+
+def load_vector_store(video_id: str, api_key: str):
+    path = get_vector_db_path(video_id)
+    if not path.exists():
+        return None
+
+    index_file = path / "index.faiss"
+    store_file = path / "index.pkl"
+    if not index_file.exists() or not store_file.exists():
+        return None
+
+    embeddings = OpenAIEmbeddings(model=EMBEDDING_MODEL, api_key=api_key)
+    return FAISS.load_local(str(path), embeddings, allow_dangerous_deserialization=True)
+
+
 def answer_query(query: str, vector_store, api_key: str) -> str:
     llm = ChatOpenAI(model=CHAT_MODEL, api_key=api_key, temperature=0.2)
     retriever = vector_store.as_retriever(search_kwargs={"k": 4})
 
     source_documents = retriever.invoke(query)
+    if not source_documents:
+        return "No relevant chunks were found in the vector index."
+
     context_blocks = []
     source_chunks = set()
     for doc in source_documents:
@@ -243,10 +300,25 @@ def main() -> None:
         st.subheader("Chunking Controls")
         max_tokens = st.slider("Tokens per chunk", 200, 1200, TOKEN_LIMIT_PER_CHUNK, 50)
         overlap = st.slider("Token overlap", 0, 200, TOKEN_OVERLAP, 10)
+        overlap_upper_bound = min(200, max_tokens - 1)
+        overlap_default = min(TOKEN_OVERLAP, overlap_upper_bound)
+        overlap = st.slider("Token overlap", 0, overlap_upper_bound, overlap_default, 10)
+
+        st.subheader("Vector Database")
+        st.caption("Indexes are persisted locally under `vector_store/<video_id>`.")
+        if st.session_state.vector_db_path:
+            st.code(st.session_state.vector_db_path)
 
     video_input = st.text_input("Paste YouTube URL or Video ID")
 
     if st.button("1) Extract Transcript and Build Index", use_container_width=True):
+    col_actions_1, col_actions_2 = st.columns(2)
+    with col_actions_1:
+        build_clicked = st.button("1) Extract Transcript and Build Index", use_container_width=True)
+    with col_actions_2:
+        load_clicked = st.button("Load Existing Index", use_container_width=True)
+
+    if build_clicked:
         if not st.session_state.openai_api_key:
             st.error("Please provide an OpenAI API key.")
             return
@@ -261,15 +333,49 @@ def main() -> None:
                 transcript_text = fetch_transcript(video_id)
                 chunks = chunk_transcript_by_tokens(transcript_text, max_tokens=max_tokens, overlap=overlap)
                 vector_store = build_vector_store(chunks, st.session_state.openai_api_key)
+                db_path = save_vector_store(vector_store, video_id)
+                save_index_metadata(video_id, transcript_text, chunks)
 
             st.session_state.video_id = video_id
             st.session_state.transcript_text = transcript_text
             st.session_state.chunks = chunks
             st.session_state.vector_store = vector_store
+            st.session_state.vector_db_path = str(db_path)
             st.success(f"Indexed video `{video_id}` with {len(chunks)} chunk(s).")
 
         except Exception as exc:
             st.error(f"Failed to process video: {exc}")
+
+    if load_clicked:
+        if not st.session_state.openai_api_key:
+            st.error("Please provide an OpenAI API key.")
+            return
+
+        video_id = extract_video_id(video_input)
+        if not video_id:
+            st.error("Could not parse a valid YouTube video ID.")
+            return
+
+        try:
+            vector_store = load_vector_store(video_id, st.session_state.openai_api_key)
+        except Exception as exc:
+            st.error(f"Failed to load saved index: {exc}")
+            return
+
+        if vector_store is None:
+            st.error("No saved vector index found for this video ID. Build it first.")
+        else:
+            metadata = load_index_metadata(video_id)
+            st.session_state.video_id = video_id
+            st.session_state.vector_store = vector_store
+            st.session_state.vector_db_path = str(get_vector_db_path(video_id))
+            if metadata:
+                st.session_state.transcript_text = metadata.get("transcript_preview", "")
+                st.session_state.chunks = metadata.get("chunks", [])
+            else:
+                st.session_state.transcript_text = ""
+                st.session_state.chunks = []
+            st.success(f"Loaded saved FAISS index for `{video_id}`.")
 
     st.markdown("---")
     col1, col2 = st.columns([1.1, 1.4])
@@ -296,6 +402,7 @@ def main() -> None:
                 st.write(st.session_state.transcript_text[:5000])
         else:
             st.info("No transcript indexed yet.")
+            st.info("No transcript indexed yet. You can still load an existing saved index.")
 
     with col2:
         st.subheader("Ask Questions About the Video")
