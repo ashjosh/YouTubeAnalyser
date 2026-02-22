@@ -371,24 +371,16 @@ def main() -> None:
         st.subheader("Chunking Controls")
         max_tokens = st.slider("Tokens per chunk", 200, 1200, TOKEN_LIMIT_PER_CHUNK, 50)
         overlap = st.slider("Token overlap", 0, 200, TOKEN_OVERLAP, 10)
-        overlap_upper_bound = min(200, max_tokens - 1)
-        overlap_default = min(TOKEN_OVERLAP, overlap_upper_bound)
-        overlap = st.slider("Token overlap", 0, overlap_upper_bound, overlap_default, 10)
-
-        st.subheader("Vector Database")
-        st.caption("Indexes are persisted locally under `vector_store/<video_id>`.")
-        if st.session_state.vector_db_path:
-            st.code(st.session_state.vector_db_path)
 
     video_input = st.text_input("Paste YouTube URL or Video ID")
-
-    if st.button("1) Extract Transcript and Build Index", use_container_width=True):
+def handle_index_actions(video_input: str, max_tokens: int, overlap: int) -> None:
     col_actions_1, col_actions_2 = st.columns(2)
     with col_actions_1:
         build_clicked = st.button("1) Extract Transcript and Build Index", use_container_width=True)
     with col_actions_2:
         load_clicked = st.button("Load Existing Index", use_container_width=True)
 
+    if st.button("1) Extract Transcript and Build Index", use_container_width=True):
     if build_clicked:
         if not st.session_state.openai_api_key:
             st.error("Please provide an OpenAI API key.")
@@ -435,18 +427,52 @@ def main() -> None:
 
         if vector_store is None:
             st.error("No saved vector index found for this video ID. Build it first.")
+            return
+
+        metadata = load_index_metadata(video_id)
+        st.session_state.video_id = video_id
+        st.session_state.vector_store = vector_store
+        st.session_state.vector_db_path = str(get_vector_db_path(video_id))
+        if metadata:
+            st.session_state.transcript_text = metadata.get("transcript_preview", "")
+            st.session_state.chunks = metadata.get("chunks", [])
         else:
-            metadata = load_index_metadata(video_id)
-            st.session_state.video_id = video_id
-            st.session_state.vector_store = vector_store
-            st.session_state.vector_db_path = str(get_vector_db_path(video_id))
-            if metadata:
-                st.session_state.transcript_text = metadata.get("transcript_preview", "")
-                st.session_state.chunks = metadata.get("chunks", [])
-            else:
-                st.session_state.transcript_text = ""
-                st.session_state.chunks = []
-            st.success(f"Loaded saved FAISS index for `{video_id}`.")
+            st.session_state.transcript_text = ""
+            st.session_state.chunks = []
+        st.success(f"Loaded saved FAISS index for `{video_id}`.")
+
+def main() -> None:
+    st.set_page_config(page_title="YouTube Transcript RAG", layout="wide")
+    init_state()
+
+    st.title("🎬 YouTube Transcript Q&A (RAG)")
+    st.write(
+        "Extract a YouTube transcript, chunk it by token count, embed chunks, store in FAISS, and ask questions about the video."
+    )
+
+    with st.sidebar:
+        st.header("Setup")
+        st.session_state.openai_api_key = st.text_input(
+            "OpenAI API Key",
+            type="password",
+            value=st.session_state.openai_api_key,
+        )
+        st.caption("Your key is used only in this running session.")
+
+        st.subheader("Chunking Controls")
+        max_tokens = st.slider("Tokens per chunk", 200, 1200, TOKEN_LIMIT_PER_CHUNK, 50)
+        overlap_upper_bound = min(200, max_tokens - 1)
+        overlap_default = min(TOKEN_OVERLAP, overlap_upper_bound)
+        overlap = st.slider("Token overlap", 0, overlap_upper_bound, overlap_default, 10)
+
+        st.subheader("Vector Database")
+        st.caption("Indexes are persisted locally under `vector_store/<video_id>`.")
+        if st.session_state.vector_db_path:
+            st.code(st.session_state.vector_db_path)
+
+    video_input = st.text_input("Paste YouTube URL or Video ID")
+
+    handle_index_actions(video_input, max_tokens, overlap)
 
     st.markdown("---")
     col1, col2 = st.columns([1.1, 1.4])
