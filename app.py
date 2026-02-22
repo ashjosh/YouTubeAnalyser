@@ -70,9 +70,32 @@ def _fetch_transcript_via_library(video_id: str) -> str:
         raise ValueError("youtube-transcript-api not installed")
 
     mod = importlib.import_module("youtube_transcript_api")
-    transcript = mod.YouTubeTranscriptApi.get_transcript(video_id, languages=["en", "hi"])
+    api_cls = mod.YouTubeTranscriptApi
 
-    parts = [x.get("text", "").strip() for x in transcript if x.get("text")]
+    try:
+        # NEWER versions
+        if hasattr(api_cls, "get_transcript"):
+            transcript = api_cls.get_transcript(video_id, languages=["en", "hi"])
+
+        # OLDER versions
+        else:
+            api = api_cls()
+            transcript = api.fetch(video_id, languages=["en", "hi"])
+
+    except Exception as e:
+        raise ValueError(f"Library transcript fetch failed: {e}")
+
+    parts = []
+
+    for item in transcript:
+        if isinstance(item, dict):
+            text = item.get("text", "").strip()
+        else:
+            text = getattr(item, "text", "").strip()
+
+        if text:
+            parts.append(text)
+
     if not parts:
         raise ValueError("Transcript empty via library")
 
@@ -93,7 +116,6 @@ def _fetch_transcript_via_timedtext(video_id: str) -> str:
         body = resp.text.strip()
         parts = []
 
-        # XML captions (most reliable)
         if body.startswith("<"):
             root = ET.fromstring(body)
             for node in root.findall(".//text"):
@@ -101,7 +123,6 @@ def _fetch_transcript_via_timedtext(video_id: str) -> str:
                 if text:
                     parts.append(text)
 
-        # JSON captions
         if body.startswith("{"):
             events = resp.json().get("events", [])
             for event in events:
@@ -269,10 +290,6 @@ def handle_index_actions(video_input: str, max_tokens: int, overlap: int):
             st.error(str(e))
 
     if load_clicked:
-        if not st.session_state.openai_api_key:
-            st.error("Provide OpenAI API Key")
-            return
-
         video_id = extract_video_id(video_input)
         vs = load_vector_store(video_id, st.session_state.openai_api_key)
 
