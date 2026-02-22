@@ -24,19 +24,18 @@ VECTOR_DB_ROOT = Path("vector_store")
 # -------------------------
 # Session State
 # -------------------------
-def init_state() -> None:
-    if "openai_api_key" not in st.session_state:
-        st.session_state.openai_api_key = os.environ.get("OPENAI_API_KEY", "")
-    if "transcript_text" not in st.session_state:
-        st.session_state.transcript_text = ""
-    if "chunks" not in st.session_state:
-        st.session_state.chunks = []
-    if "vector_store" not in st.session_state:
-        st.session_state.vector_store = None
-    if "video_id" not in st.session_state:
-        st.session_state.video_id = ""
-    if "vector_db_path" not in st.session_state:
-        st.session_state.vector_db_path = ""
+def init_state():
+    defaults = {
+        "openai_api_key": os.environ.get("OPENAI_API_KEY", ""),
+        "transcript_text": "",
+        "chunks": [],
+        "vector_store": None,
+        "video_id": "",
+        "vector_db_path": "",
+    }
+    for k, v in defaults.items():
+        if k not in st.session_state:
+            st.session_state[k] = v
 
 
 # -------------------------
@@ -68,34 +67,41 @@ def extract_video_id(url_or_id: str) -> str:
 def _fetch_transcript_via_library(video_id: str) -> str:
     mod_spec = importlib.util.find_spec("youtube_transcript_api")
     if mod_spec is None:
-        raise ValueError("youtube-transcript-api not installed.")
+        raise ValueError("youtube-transcript-api not installed")
 
     mod = importlib.import_module("youtube_transcript_api")
-    api_cls = mod.YouTubeTranscriptApi
+    transcript = mod.YouTubeTranscriptApi.get_transcript(video_id, languages=["en", "hi"])
 
-    transcript = api_cls.get_transcript(video_id, languages=["en", "hi"])
-    parts = [item.get("text", "").strip() for item in transcript if item.get("text")]
-
+    parts = [x.get("text", "").strip() for x in transcript if x.get("text")]
     if not parts:
-        raise ValueError("Transcript empty.")
+        raise ValueError("Transcript empty via library")
 
     return " ".join(parts)
 
 
 def _fetch_transcript_via_timedtext(video_id: str) -> str:
     urls = [
-        f"https://www.youtube.com/api/timedtext?lang=en&v={video_id}&fmt=json3",
-        f"https://www.youtube.com/api/timedtext?lang=en&kind=asr&v={video_id}&fmt=json3",
+        f"https://www.youtube.com/api/timedtext?lang=en&v={video_id}",
+        f"https://www.youtube.com/api/timedtext?lang=en&kind=asr&v={video_id}",
     ]
 
     for url in urls:
-        resp = requests.get(url, timeout=20)
+        resp = requests.get(url, timeout=20, headers={"User-Agent": "Mozilla/5.0"})
         if not resp.ok:
             continue
 
         body = resp.text.strip()
         parts = []
 
+        # XML captions (most reliable)
+        if body.startswith("<"):
+            root = ET.fromstring(body)
+            for node in root.findall(".//text"):
+                text = unescape("".join(node.itertext())).strip()
+                if text:
+                    parts.append(text)
+
+        # JSON captions
         if body.startswith("{"):
             events = resp.json().get("events", [])
             for event in events:
@@ -107,7 +113,7 @@ def _fetch_transcript_via_timedtext(video_id: str) -> str:
         if parts:
             return " ".join(parts)
 
-    raise ValueError("No captions via timedtext.")
+    raise ValueError("No captions via timedtext endpoint")
 
 
 def fetch_transcript(video_id: str) -> str:
@@ -119,7 +125,11 @@ def fetch_transcript(video_id: str) -> str:
         except Exception as exc:
             errors.append(str(exc))
 
-    raise ValueError("Transcript unavailable: " + " | ".join(errors))
+    st.error("Transcript fetch failed. Reasons:")
+    for err in errors:
+        st.write("•", err)
+
+    raise ValueError("Transcript unavailable")
 
 
 # -------------------------
@@ -204,7 +214,7 @@ def answer_query(query: str, vector_store, api_key: str) -> str:
     )
 
     prompt = f"""
-Use ONLY the transcript context.
+Use ONLY this transcript context.
 
 Context:
 {context}
@@ -220,7 +230,7 @@ Answer in bullet points and cite chunk IDs.
 # -------------------------
 # Actions
 # -------------------------
-def handle_index_actions(video_input: str, max_tokens: int, overlap: int) -> None:
+def handle_index_actions(video_input: str, max_tokens: int, overlap: int):
     col1, col2 = st.columns(2)
 
     with col1:
@@ -230,31 +240,44 @@ def handle_index_actions(video_input: str, max_tokens: int, overlap: int) -> Non
         load_clicked = st.button("Load Index", use_container_width=True)
 
     if build_clicked:
+        if not st.session_state.openai_api_key:
+            st.error("Provide OpenAI API Key")
+            return
+
         video_id = extract_video_id(video_input)
         if not video_id:
             st.error("Invalid video URL / ID")
             return
 
-        with st.spinner("Processing transcript..."):
-            transcript = fetch_transcript(video_id)
+        try:
+            with st.spinner("Fetching transcript..."):
+                transcript = fetch_transcript(video_id)
+
             chunks = chunk_transcript_by_tokens(transcript, max_tokens, overlap)
             vs = build_vector_store(chunks, st.session_state.openai_api_key)
             path = save_vector_store(vs, video_id)
 
-        st.session_state.video_id = video_id
-        st.session_state.transcript_text = transcript
-        st.session_state.chunks = chunks
-        st.session_state.vector_store = vs
-        st.session_state.vector_db_path = str(path)
+            st.session_state.video_id = video_id
+            st.session_state.transcript_text = transcript
+            st.session_state.chunks = chunks
+            st.session_state.vector_store = vs
+            st.session_state.vector_db_path = str(path)
 
-        st.success("Index built successfully")
+            st.success("Index built successfully")
+
+        except Exception as e:
+            st.error(str(e))
 
     if load_clicked:
+        if not st.session_state.openai_api_key:
+            st.error("Provide OpenAI API Key")
+            return
+
         video_id = extract_video_id(video_input)
         vs = load_vector_store(video_id, st.session_state.openai_api_key)
 
         if vs is None:
-            st.error("Index not found")
+            st.error("Index not found. Build it first.")
             return
 
         st.session_state.vector_store = vs
@@ -264,19 +287,19 @@ def handle_index_actions(video_input: str, max_tokens: int, overlap: int) -> Non
 # -------------------------
 # UI
 # -------------------------
-def main() -> None:
+def main():
     st.set_page_config(page_title="YouTube Transcript RAG", layout="wide")
     init_state()
 
-    st.title("🎬 YouTube Transcript Q&A")
+    st.title("🎬 YouTube Transcript Q&A (RAG)")
 
     with st.sidebar:
         st.session_state.openai_api_key = st.text_input("OpenAI API Key", type="password")
 
         max_tokens = st.slider("Tokens per chunk", 200, 1200, TOKEN_LIMIT_PER_CHUNK)
-        overlap = st.slider("Overlap", 0, max_tokens - 1, min(60, max_tokens - 1))
+        overlap = st.slider("Overlap", 0, max_tokens - 1, min(TOKEN_OVERLAP, max_tokens - 1))
 
-    video_input = st.text_input("YouTube URL or ID")
+    video_input = st.text_input("YouTube URL or Video ID")
 
     handle_index_actions(video_input, max_tokens, overlap)
 
@@ -289,7 +312,7 @@ def main() -> None:
             st.error("Build or load index first")
             return
 
-        with st.spinner("Thinking..."):
+        with st.spinner("Generating answer..."):
             answer = answer_query(
                 query,
                 st.session_state.vector_store,
