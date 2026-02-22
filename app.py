@@ -1,15 +1,13 @@
+import json
 import os
 import re
 from urllib.parse import parse_qs, urlparse
 
+import requests
 import streamlit as st
 import tiktoken
-from langchain.chains import RetrievalQA
-from langchain.prompts import PromptTemplate
 from langchain_community.vectorstores import FAISS
 from langchain_openai import ChatOpenAI, OpenAIEmbeddings
-import json
-import requests
 
 
 EMBEDDING_MODEL = "text-embedding-3-small"
@@ -133,29 +131,27 @@ def answer_query(query: str, vector_store, api_key: str) -> str:
     llm = ChatOpenAI(model=CHAT_MODEL, api_key=api_key, temperature=0.2)
     retriever = vector_store.as_retriever(search_kwargs={"k": 4})
 
-    prompt = PromptTemplate(
-        input_variables=["context", "question"],
-        template=(
-            "You are helping users understand a YouTube video transcript.\n"
-            "Use only the provided context chunks from the transcript.\n"
-            "If the answer is not present, clearly say it is not found in the transcript.\n\n"
-            "Context:\n{context}\n\n"
-            "Question: {question}\n"
-            "Answer with short bullet points and mention chunk IDs when relevant."
-        ),
+    source_documents = retriever.invoke(query)
+    context_blocks = []
+    source_chunks = set()
+    for doc in source_documents:
+        cid = doc.metadata.get("chunk_id", "?")
+        source_chunks.add(cid)
+        context_blocks.append(f"[chunk_id={cid}]\n{doc.page_content}")
+
+    context = "\n\n".join(context_blocks)
+    prompt = (
+        "You are helping users understand a YouTube video transcript.\n"
+        "Use only the provided context chunks from the transcript.\n"
+        "If the answer is not present, clearly say it is not found in the transcript.\n\n"
+        f"Context:\n{context}\n\n"
+        f"Question: {query}\n"
+        "Answer with short bullet points and mention chunk IDs when relevant."
     )
 
-    qa_chain = RetrievalQA.from_chain_type(
-        llm=llm,
-        retriever=retriever,
-        chain_type="stuff",
-        chain_type_kwargs={"prompt": prompt},
-        return_source_documents=True,
-    )
-
-    result = qa_chain.invoke({"query": query})
-    source_chunks = sorted({doc.metadata.get("chunk_id") for doc in result["source_documents"]})
-    return f"{result['result']}\n\nSources: chunk(s) {', '.join(map(str, source_chunks))}"
+    answer = llm.invoke(prompt).content
+    sorted_chunks = sorted(source_chunks, key=lambda x: (isinstance(x, str), x))
+    return f"{answer}\n\nSources: chunk(s) {', '.join(map(str, sorted_chunks))}"
 
 
 def main() -> None:
