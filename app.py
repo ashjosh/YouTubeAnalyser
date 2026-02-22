@@ -1,4 +1,5 @@
 import json
+import importlib
 import os
 import re
 from urllib.parse import parse_qs, urlparse
@@ -47,9 +48,58 @@ def extract_video_id(url_or_id: str) -> str:
     return ""
 
 
-def fetch_transcript(video_id: str) -> str:
+def _fetch_transcript_via_library(video_id: str) -> str:
+    """Try youtube-transcript-api when available in deployment environment."""
+    mod_spec = importlib.util.find_spec("youtube_transcript_api")
+    if mod_spec is None:
+        raise ValueError("youtube-transcript-api package not installed.")
+
+    mod = importlib.import_module("youtube_transcript_api")
+    api = mod.YouTubeTranscriptApi
+
+    transcript = api.get_transcript(video_id, languages=["en", "en-US", "en-GB", "hi"])
+    parts = [item.get("text", "").strip() for item in transcript if item.get("text")]
+    parts = [p for p in parts if p]
+    if not parts:
+        raise ValueError("Transcript fetched by library but empty.")
+    return " ".join(parts)
+
+
+def _fetch_transcript_via_timedtext(video_id: str) -> str:
+    """Try YouTube timedtext endpoint directly (works for many captioned videos)."""
+    candidates = [
+        f"https://www.youtube.com/api/timedtext?lang=en&v={video_id}&fmt=json3",
+        f"https://www.youtube.com/api/timedtext?lang=en&kind=asr&v={video_id}&fmt=json3",
+        f"https://www.youtube.com/api/timedtext?lang=hi&v={video_id}&fmt=json3",
+        f"https://www.youtube.com/api/timedtext?lang=hi&kind=asr&v={video_id}&fmt=json3",
+    ]
+
+    for url in candidates:
+        resp = requests.get(url, timeout=20, headers={"User-Agent": "Mozilla/5.0"})
+        if not resp.ok:
+            continue
+        payload = resp.json() if resp.text.strip().startswith("{") else {}
+        events = payload.get("events", [])
+        parts = []
+        for event in events:
+            for seg in event.get("segs", []):
+                text = seg.get("utf8", "").strip()
+                if text:
+                    parts.append(text)
+        if parts:
+            return " ".join(parts)
+
+    raise ValueError("No captions found via timedtext endpoint.")
+
+
+def _fetch_transcript_via_page_scrape(video_id: str) -> str:
+    """Fallback transcript fetcher from watch page caption track metadata."""
     watch_url = f"https://www.youtube.com/watch?v={video_id}"
-    response = requests.get(watch_url, timeout=20)
+    response = requests.get(
+        watch_url,
+        timeout=20,
+        headers={"User-Agent": "Mozilla/5.0"},
+    )
     response.raise_for_status()
 
     match = re.search(r"ytInitialPlayerResponse\s*=\s*(\{.+?\});", response.text)
@@ -73,8 +123,7 @@ def fetch_transcript(video_id: str) -> str:
     events = transcript_resp.json().get("events", [])
     parts = []
     for event in events:
-        segs = event.get("segs", [])
-        for seg in segs:
+        for seg in event.get("segs", []):
             text = seg.get("utf8", "").strip()
             if text:
                 parts.append(text)
@@ -83,6 +132,25 @@ def fetch_transcript(video_id: str) -> str:
         raise ValueError("Transcript fetched but empty.")
 
     return " ".join(parts)
+
+
+def fetch_transcript(video_id: str) -> str:
+    """
+    Fetch transcript with a robust 2-step strategy:
+    1) youtube-transcript-api
+    2) page-scrape fallback
+    """
+    errors = []
+    for fn in (_fetch_transcript_via_library, _fetch_transcript_via_timedtext, _fetch_transcript_via_page_scrape):
+        try:
+            return fn(video_id)
+        except Exception as exc:
+            errors.append(str(exc))
+
+    raise ValueError(
+        "No captions/transcript available for this video. "
+        "Tried library + timedtext + page fallback. Details: " + " | ".join(errors)
+    )
 
 
 def chunk_transcript_by_tokens(text: str, max_tokens: int, overlap: int):
